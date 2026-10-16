@@ -1,0 +1,14 @@
+# Environment Variables
+.env
+
+# Python Cache & Artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local Scratch & Temp
+scratch/
+processed_log.csv
+activation_log.csv
+bank_proof_*.png
