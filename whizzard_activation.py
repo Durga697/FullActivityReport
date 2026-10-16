@@ -318,7 +318,7 @@ class WhizzardActivationAutomation:
         """Applies a Super User Remark modal text on a user card in Search Users list by searching for mobile number."""
         try:
             self.navigate_to_search_users()
-            
+
             # Filter search users by mobile number
             search_inputs = self.driver.find_elements(
                 By.XPATH, "//input[contains(@placeholder, 'Search') or contains(@placeholder, 'Mobile') or contains(@ng-model, 'search')]"
@@ -818,7 +818,7 @@ class WhizzardActivationAutomation:
             time.sleep(2)
 
             modal = self.wait.until(EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'modal-content')] | //div[contains(@class, 'modal-dialog')]")))
-            
+
             if not self.dry_run:
                 modal_approve_btn = modal.find_element(
                     By.XPATH, ".//button[contains(text(), 'Approve') or contains(text(), 'Activate') or contains(@class, 'btn-success')]"
