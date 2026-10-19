@@ -75,6 +75,17 @@ python whizzard_remarks.py
    WHIZZARD_PASSWORD=your_password
    ```
 
+## GitHub Actions Schedule
+
+The remarks automation runs every day at **10:00 AM IST** through
+`.github/workflows/daily-remarks.yml`. It can also be started manually from the
+repository's **Actions** tab.
+
+Add these repository secrets under **Settings → Secrets and variables → Actions**:
+
+- `WHIZZARD_MOBILE`
+- `WHIZZARD_PASSWORD`
+
 ---
 
 ## Repository Structure
