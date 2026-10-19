@@ -1,31 +1,67 @@
-# Whizzard Admin Panel - User Activation Automation
+# Whizzard Admin Panel Automations
 
-Automated Python tool using **Selenium** to log into the Whizzard Admin Panel, identify eligible pending users, map Gross Pay to salary bands, and update personal, payout, and bank information.
+Automated Python tools using **Selenium** for managing user workflows on the Whizzard Admin Panel:
+1. **User Activation Automation (`whizzard_activation.py`)**: Identifies eligible pending users, maps Gross Pay from remarks to salary bands, unlocks personal & payout details, and updates bank information.
+2. **Super User Remarks Automation (`whizzard_remarks.py`)**: Evaluates pending users' missing profile fields and automatically applies standardized Super User Remarks based on pre-defined business rules.
 
 ---
 
-## Features
+## 1. User Activation Automation (`whizzard_activation.py`)
 
-- **Automated Authentication**: Securely logs into Whizzard Admin Panel using credentials from `.env`.
-- **Gross Pay Parsing & Band Mapping**:
-  - Automatically parses Gross Pay values from Ops Team Remarks (e.g. `20K`, `20000`, `MON-R(20000)`, `Gross pay-26000/-`).
-  - Maps Gross Pay to corresponding Band numbers (`01` through `15`) based on configured pay range brackets.
+### Features
+- **Gross Pay Parsing & Band Mapping**: Parses Gross Pay values from Ops Team Remarks (e.g. `20K`, `20000`, `MON-R(20000)`, `Gross pay-26000/-`) and maps them to Band numbers (`01` through `15`).
 - **Profile Field Unlocking & Auto-fill**:
   - Sets **Payouts Eligibility** to `Yes`.
   - Sets **Pan Aadhaar Linkage** to `Yes`.
   - Sets **Contract Staff** to `No`.
   - Fills mapped **Band** & **Gross Pay** in Payment Info.
-- **Bank Information Update**: Opens and saves bank information without bank-document OCR verification.
-- **Activation Finalization**:
-  - Confirms updated status, executes approval checkmarks, and verifies `Completed` / `Activated` user state.
-- **Safety Flags**:
-  - `--dry-run`: Test navigation, parsing, and form filling without applying final changes.
-  - `--headful`: Run browser with GUI visible (default is headless).
-- **Audit Logging**: Maintains a CSV log (`activation_log.csv`) recording every user activation attempt and result.
+- **Bank Information Update**: Opens and saves bank details.
+- **Audit Logging**: Maintains `activation_log.csv` recording each activation attempt.
+
+### Usage
+```bash
+# Dry-run test (safe testing without saving)
+python whizzard_activation.py --dry-run
+
+# Run with visible browser GUI
+python whizzard_activation.py --headful
+
+# Run production automation (headless)
+python whizzard_activation.py
+```
 
 ---
 
-## Setup Instructions
+## 2. Super User Remarks Automation (`whizzard_remarks.py`)
+
+### Features
+- **Standardized Rule Mapping**:
+  - `> 7 Missing Fields` → `Kindly complete all fields for user activation.`
+  - `Missing Bank Details`, `Missing Bank Proof Photo` & `Missing Gross Pay` → `Kindly upload bank details and docs also mention gross pay for user activation.`
+  - `Missing Bank Details`, `Missing Bank Proof Photo` & `Missing Payment Plan` → `Kindly upload bank details and docs also mention payment plan for user activation.`
+  - `Missing Bank Details` & `Missing Bank Proof Photo` → `Kindly upload bank details and docs for user activation.`
+  - `Missing Client Employee Id` & `Missing Payment Plan` → `Kindly mention client employee id & payment plan for user activation.`
+  - `Missing Client Employee Id` → `Kindly mention client employee id for user activation.`
+  - `Missing Gross Pay` → `Kindly mention gross pay for user activation.`
+  - `Missing Payment Plan` → `Kindly mention payment plan for user activation.`
+- **Idempotent & Date-Aware**: Skips profiles if a remark was already applied today, preventing duplicate remarks.
+- **Audit Logging**: Maintains `processed_log.csv` recording each profile visited, missing fields, remark applied, and status.
+
+### Usage
+```bash
+# Dry-run test (format remarks without saving to server)
+python whizzard_remarks.py --dry-run
+
+# Run with visible browser GUI
+python whizzard_remarks.py --dry-run --headful
+
+# Run production automation (headless)
+python whizzard_remarks.py
+```
+
+---
+
+## Common Setup Instructions
 
 1. **Install Dependencies**:
    ```bash
@@ -33,38 +69,20 @@ Automated Python tool using **Selenium** to log into the Whizzard Admin Panel, i
    ```
 
 2. **Configure Environment Variables**:
-   Copy `.env.example` to `.env` and configure credentials:
+   Copy `.env.example` to `.env` and fill in credentials:
    ```env
-   WHIZZARD_MOBILE=7658978951
-   WHIZZARD_PASSWORD=zxcvbnm,.
+   WHIZZARD_MOBILE=your_mobile_number
+   WHIZZARD_PASSWORD=your_password
    ```
 
 ---
 
-## Usage
+## Repository Structure
 
-### Run in Dry-Run Mode (Safe Testing)
-```bash
-python whizzard_activation.py --dry-run
 ```
-
-### Run in Headful / Visible GUI Mode
-```bash
-python whizzard_activation.py --headful
+├── .env.example            # Environment variables template
+├── .gitignore              # Git ignore rules (.env, logs, pycache)
+├── README.md               # Repository documentation
+├── whizzard_activation.py  # User activation automation script
+└── whizzard_remarks.py     # Super user remarks automation script
 ```
-
-### Run Production Automation
-```bash
-python whizzard_activation.py
-```
-
----
-
-## File Structure
-
-- `whizzard_activation.py`: Main user activation automation script.
-- `.env`: Local credentials & API keys (ignored by Git).
-- `.env.example`: Template for credentials.
-- `.gitignore`: Git exclusion configuration.
-- `activation_log.csv`: Generated audit log file.
-- `README.md`: Documentation and instructions.
