@@ -1,8 +1,8 @@
 # Whizzard Admin Panel Automations
 
-Automated Python tools using **Selenium** for managing user workflows on the Whizzard Admin Panel:
-1. **User Activation Automation (`whizzard_activation.py`)**: Identifies eligible pending users, maps Gross Pay from remarks to salary bands, unlocks personal & payout details, and updates bank information.
-2. **Super User Remarks Automation (`whizzard_remarks.py`)**: Evaluates pending users' missing profile fields and automatically applies standardized Super User Remarks based on pre-defined business rules.
+Automated Python browser tools for managing user workflows on the Whizzard Admin Panel:
+1. **User Activation Automation (`whizzard_activation.py`, Selenium)**: Identifies eligible pending users, maps Gross Pay from remarks to salary bands, unlocks personal & payout details, and updates bank information.
+2. **Super User Remarks Automation (`whizzard_remarks.py`, Playwright)**: Evaluates pending users' missing profile fields and automatically applies standardized Super User Remarks based on pre-defined business rules.
 
 ---
 
@@ -63,10 +63,14 @@ python whizzard_remarks.py
 
 ## Common Setup Instructions
 
-1. **Install Dependencies**:
+1. **Install Remarks Automation Dependencies**:
    ```bash
-   pip install selenium webdriver-manager python-dotenv
+   pip install -r requirements.txt
+   playwright install chromium
    ```
+
+   The separate activation automation currently uses Selenium and requires
+   `selenium`, `webdriver-manager`, and `python-dotenv`.
 
 2. **Configure Environment Variables**:
    Copy `.env.example` to `.env` and fill in credentials:
