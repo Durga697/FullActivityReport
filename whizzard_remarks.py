@@ -26,6 +26,12 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    ElementNotInteractableException,
+    StaleElementReferenceException,
+    TimeoutException,
+)
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
@@ -236,13 +242,73 @@ def append_csv_log(profile_name, mobile, missing_fields, remark, status, is_dry_
 
 
 def wait_loader(driver, timeout=15):
-    """Waits for Angular loading spinner (#loader-wrapper) to disappear."""
+    """Wait for the page and known blocking overlays to finish."""
+    WebDriverWait(driver, timeout).until(
+        lambda browser: browser.execute_script("return document.readyState") == "complete"
+    )
+
+    overlay_locator = (
+        By.CSS_SELECTOR,
+        "#loader-wrapper, .ngx-spinner-overlay, .loading-overlay, "
+        ".blockUI.blockOverlay, .modal-backdrop.show",
+    )
     try:
         WebDriverWait(driver, timeout).until(
-            EC.invisibility_of_element_located((By.ID, "loader-wrapper"))
+            EC.invisibility_of_element_located(overlay_locator)
         )
-    except Exception:
-        pass
+    except TimeoutException:
+        # Some pages retain hidden/stale overlay nodes in the DOM. The
+        # guarded click below remains the final source of truth.
+        print(f"[NOTE] A blocking overlay remained after {timeout}s.")
+
+
+def safe_click(driver, locator, timeout=20, attempts=3, description="element"):
+    """Click a dynamic Angular element, retrying transient UI interception."""
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            wait_loader(driver, timeout=min(timeout, 10))
+            element = WebDriverWait(driver, timeout).until(
+                EC.element_to_be_clickable(locator)
+            )
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
+                element,
+            )
+            WebDriverWait(driver, 5).until(
+                lambda browser: element.is_displayed() and element.is_enabled()
+            )
+            element.click()
+            return element
+        except (
+            ElementClickInterceptedException,
+            ElementNotInteractableException,
+            StaleElementReferenceException,
+            TimeoutException,
+        ) as exc:
+            last_error = exc
+            print(
+                f"[NOTE] Could not click {description} on attempt "
+                f"{attempt}/{attempts}: {type(exc).__name__}"
+            )
+            time.sleep(attempt)
+
+    # A centered native click can remain blocked by a transparent/sticky
+    # header in headless Chrome. Re-find the element before the JS fallback
+    # so a stale reference is never reused.
+    try:
+        element = WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located(locator)
+        )
+        driver.execute_script("arguments[0].click();", element)
+        print(f"[NOTE] Used JavaScript click fallback for {description}.")
+        return element
+    except Exception as fallback_error:
+        cause = last_error or fallback_error
+        raise RuntimeError(
+            f"Unable to click {description} after {attempts} attempts"
+        ) from cause
 
 
 def run_automation(dry_run=False, headless=True):
@@ -301,21 +367,32 @@ def run_automation(dry_run=False, headless=True):
 
         # Step 2 & 3: Navigate via Sidebar to Onboarding -> Search Users
         print("\n[STEP 2] Navigating to Onboarding -> Search Users...")
-        try:
-            onboarding_els = driver.find_elements(By.XPATH, "//*[contains(text(), 'Onboarding')]")
-            if not onboarding_els or not onboarding_els[0].is_displayed():
-                hamburger = driver.find_element(By.XPATH, "//button[contains(@class, 'navbar-toggler')] | //header//i | //button[span[contains(@class, 'navbar-toggler')]]")
-                hamburger.click()
-                time.sleep(1)
-        except Exception as e:
-            print(f"[NOTE] Sidebar check notice: {e}")
+        onboarding_locator = (
+            By.XPATH,
+            "//*[self::a or self::button or self::span][contains(normalize-space(.), 'Onboarding')]",
+        )
+        onboarding_els = driver.find_elements(*onboarding_locator)
+        if not any(element.is_displayed() for element in onboarding_els):
+            hamburger_locator = (
+                By.CSS_SELECTOR,
+                "button.navbar-toggler, button[aria-label*='menu' i], "
+                "button[aria-label*='navigation' i], i.fa.fa-bars",
+            )
+            safe_click(
+                driver,
+                hamburger_locator,
+                description="sidebar menu toggle",
+            )
+            time.sleep(1)
 
-        onboarding_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Onboarding')]")))
-        onboarding_btn.click()
+        safe_click(driver, onboarding_locator, description="Onboarding menu")
         time.sleep(1)
 
-        search_users_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Search Users')]")))
-        search_users_btn.click()
+        search_users_locator = (
+            By.XPATH,
+            "//*[self::a or self::button or self::span][contains(normalize-space(.), 'Search Users')]",
+        )
+        safe_click(driver, search_users_locator, description="Search Users menu")
         wait_loader(driver)
         time.sleep(2)
 
