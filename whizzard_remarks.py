@@ -264,12 +264,40 @@ def parse_profile(row):
 
 
 def apply_remark(page, col0, remark_cell, remark, dry_run):
-    pencil = remark_cell.locator("button, a:has(i.fa-pencil), i.fa-pencil")
-    if pencil.count() == 0:
-        pencil = col0.locator(
-            "button.btn-outline-primary, button:has(i.fa-pencil), a:has(i.fa-pencil)"
-        )
-    safe_click(page, pencil, description="remark edit button")
+    edit_candidates = [
+        remark_cell.locator(
+            "button:visible:has(i.fa-pencil), "
+            "button:visible:has(i[class*='pencil']), "
+            "a:visible:has(i.fa-pencil), "
+            "a:visible:has(i[class*='pencil'])"
+        ),
+        remark_cell.locator(
+            "button:visible[title*='remark' i], "
+            "button:visible[aria-label*='remark' i], "
+            "button:visible[title*='edit' i], "
+            "button:visible[aria-label*='edit' i]"
+        ),
+        remark_cell.locator("button:visible"),
+        col0.locator(
+            "button.btn-outline-primary:visible, "
+            "button:visible:has(i.fa-pencil), "
+            "button:visible:has(i[class*='pencil']), "
+            "a:visible:has(i.fa-pencil), "
+            "a:visible:has(i[class*='pencil'])"
+        ),
+    ]
+    pencil = next(
+        (candidate.first for candidate in edit_candidates if candidate.count()),
+        None,
+    )
+    if pencil is None:
+        raise RuntimeError("No visible remark edit button found in the profile row")
+
+    try:
+        safe_click(page, pencil, description="remark edit button", attempts=1)
+    except RuntimeError:
+        pencil.evaluate("element => element.click()")
+        print("[NOTE] Used DOM click for remark edit button.")
 
     modal = page.locator(".modal-content:visible, .modal-dialog:visible").first
     modal.wait_for(state="visible")
