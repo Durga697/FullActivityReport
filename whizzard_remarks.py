@@ -239,11 +239,46 @@ def exact_text_control(page, text):
     )
 
 
-def parse_profile(row):
+def normalize_label(value):
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def get_table_column_indexes(page):
+    """Find important columns by their headings instead of fixed positions."""
+    headers = [value.strip() for value in page.locator("thead th").all_text_contents()]
+    normalized = [normalize_label(value) for value in headers]
+
+    def find_index(required_words, fallback):
+        for index, label in enumerate(normalized):
+            if all(word in label for word in required_words):
+                return index
+        return fallback
+
+    identity_index = next(
+        (
+            index
+            for index, label in enumerate(normalized)
+            if label in {"user", "profile", "user details"}
+        ),
+        0,
+    )
+    columns = {
+        "identity": identity_index,
+        "missing": find_index(("missing",), 2),
+        "remark": find_index(("super", "remark"), -1),
+    }
+    if columns["remark"] == -1:
+        columns["remark"] = find_index(("remark",), 4)
+    print(f"[STEP 5] Table headers: {headers}")
+    print(f"[STEP 5] Detected columns: {columns}")
+    return columns
+
+
+def parse_profile(row, columns):
     cells = row.locator("td")
-    col0 = cells.nth(0)
-    col2_missing = cells.nth(2)
-    col4_remark = cells.nth(4)
+    col0 = cells.nth(columns["identity"])
+    col2_missing = cells.nth(columns["missing"])
+    col4_remark = cells.nth(columns["remark"])
     identity_text = col0.inner_text()
     name_match = re.search(r"Name:\s*([^\n]+)", identity_text)
     mobile_match = re.search(r"Mobile:\s*(\d{10})", identity_text, re.I)
@@ -260,63 +295,113 @@ def parse_profile(row):
         for value in col2_missing.locator("li").all_text_contents()
         if value.strip()
     ]
-    return name, mobile, missing_fields, col0, col4_remark
+    return name, mobile, missing_fields, col4_remark
 
 
-def apply_remark(page, col0, remark_cell, remark, dry_run):
+def apply_remark(page, remark_cell, remark, dry_run):
+    """Open the row's remark editor, save it, and verify the table was updated."""
     edit_candidates = [
         remark_cell.locator(
-            "button:visible:has(i.fa-pencil), "
-            "button:visible:has(i[class*='pencil']), "
-            "a:visible:has(i.fa-pencil), "
-            "a:visible:has(i[class*='pencil'])"
+            "button.btn.btn-xs:visible:has(i.fa-pencil), "
+            "button.btn.btn-xs:visible:has(i[class*='pencil'])"
         ),
-        remark_cell.locator(
-            "button:visible[title*='remark' i], "
-            "button:visible[aria-label*='remark' i], "
-            "button:visible[title*='edit' i], "
-            "button:visible[aria-label*='edit' i]"
-        ),
-        remark_cell.locator("button:visible"),
-        col0.locator(
-            "button.btn-outline-primary:visible, "
-            "button:visible:has(i.fa-pencil), "
-            "button:visible:has(i[class*='pencil']), "
-            "a:visible:has(i.fa-pencil), "
-            "a:visible:has(i[class*='pencil'])"
-        ),
+        remark_cell.locator("button.btn.btn-xs:visible"),
     ]
-    pencil = next(
-        (candidate.first for candidate in edit_candidates if candidate.count()),
-        None,
+    editor = page.locator(
+        "textarea:visible, "
+        "input:visible[formcontrolname*='remark' i], "
+        "input:visible[name*='remark' i], "
+        "[contenteditable='true']:visible"
+    ).first
+    editor_opened = False
+    candidate_number = 0
+    attempted_controls = []
+    for candidates in edit_candidates:
+        for index in range(candidates.count()):
+            candidate_number += 1
+            candidate = candidates.nth(index)
+            attempted_controls.append(
+                candidate.evaluate(
+                    """element => ({
+                        tag: element.tagName,
+                        text: (element.innerText || '').trim(),
+                        title: element.getAttribute('title'),
+                        ariaLabel: element.getAttribute('aria-label'),
+                        className: element.getAttribute('class')
+                    })"""
+                )
+            )
+            try:
+                safe_click(
+                    page,
+                    candidate,
+                    description=f"remark edit candidate {candidate_number}",
+                    attempts=1,
+                    timeout=5_000,
+                )
+                editor.wait_for(state="visible", timeout=4_000)
+                editor_opened = True
+                break
+            except (PlaywrightTimeoutError, RuntimeError):
+                print(
+                    f"[NOTE] Candidate {candidate_number} did not open the remark editor."
+                )
+                try:
+                    candidate.evaluate("element => element.click()")
+                    editor.wait_for(state="visible", timeout=4_000)
+                    print(
+                        f"[NOTE] DOM click opened candidate {candidate_number}."
+                    )
+                    editor_opened = True
+                    break
+                except (PlaywrightTimeoutError, PlaywrightError):
+                    pass
+        if editor_opened:
+            break
+
+    if not editor_opened:
+        raise RuntimeError(
+            "No remark edit control opened an editor. "
+            f"Controls tried: {attempted_controls}"
+        )
+
+    editor.fill(remark)
+    dialog = editor.locator(
+        "xpath=ancestor::*[@role='dialog' or "
+        "contains(concat(' ', normalize-space(@class), ' '), ' modal-content ')][1]"
     )
-    if pencil is None:
-        raise RuntimeError("No visible remark edit button found in the profile row")
-
-    try:
-        safe_click(page, pencil, description="remark edit button", attempts=1)
-    except RuntimeError:
-        pencil.evaluate("element => element.click()")
-        print("[NOTE] Used DOM click for remark edit button.")
-
-    modal = page.locator(".modal-content:visible, .modal-dialog:visible").first
-    modal.wait_for(state="visible")
-    modal.locator("textarea").fill(remark)
+    controls = dialog if dialog.count() else page
     if dry_run:
         safe_click(
             page,
-            modal.get_by_role("button", name=re.compile("close", re.I)),
+            controls.get_by_role("button", name=re.compile("close|cancel", re.I)),
             description="Close remark modal",
         )
         return "DRY RUN — Remark Formatted (Not Saved)"
 
     safe_click(
         page,
-        modal.get_by_role("button", name=re.compile("save", re.I)),
+        controls.get_by_role(
+            "button", name=re.compile(r"^\s*(save|submit|update)\s*$", re.I)
+        ),
         description="Save remark",
     )
     wait_for_page(page)
-    page.wait_for_timeout(2_000)
+    editor.wait_for(state="hidden", timeout=15_000)
+    page.wait_for_timeout(1_000)
+
+    # A click alone is not proof that the API accepted the remark. The table
+    # must display the saved text before this profile is counted as successful.
+    try:
+        remark_cell.get_by_text(remark, exact=False).wait_for(
+            state="visible", timeout=15_000
+        )
+    except PlaywrightTimeoutError as error:
+        current_text = remark_cell.inner_text().strip()
+        raise RuntimeError(
+            "Save dialog closed, but the saved remark was not visible in the "
+            f"profile row. Current remark cell: {current_text!r}"
+        ) from error
     return "SUCCESS — Remark Applied & Saved"
 
 
@@ -398,17 +483,20 @@ def run_automation(dry_run=False, headless=True):
                 wait_for_page(page)
                 page.wait_for_timeout(3_000)
 
-            processed = skipped_existing = skipped_unmapped = applied = 0
+            columns = get_table_column_indexes(page)
+            processed = skipped_existing = skipped_unmapped = applied = failures = 0
             page_number = 1
             while True:
                 row_count = page.locator("tbody tr").count()
                 print(f"[STEP 5] Page {page_number}: {row_count} pending profiles.")
                 for index in range(row_count):
                     row = page.locator("tbody tr").nth(index)
-                    if row.locator("td").count() < 5:
+                    if row.locator("td").count() <= max(columns.values()):
                         continue
                     processed += 1
-                    name, user_mobile, missing, col0, remark_cell = parse_profile(row)
+                    name, user_mobile, missing, remark_cell = parse_profile(
+                        row, columns
+                    )
                     existing_remark = remark_cell.inner_text().strip()
                     print(
                         f"Profile {index + 1}/{row_count}: {name} | "
@@ -434,12 +522,13 @@ def run_automation(dry_run=False, headless=True):
                         continue
 
                     try:
-                        status = apply_remark(page, col0, remark_cell, remark, dry_run)
+                        status = apply_remark(page, remark_cell, remark, dry_run)
                         if not dry_run:
                             applied += 1
                         print(f"[SUCCESS] {status}")
                         append_csv_log(name, user_mobile, missing, remark, status, dry_run)
                     except (PlaywrightError, RuntimeError) as error:
+                        failures += 1
                         status = f"FAILED — ERROR applying remark: {error}"
                         print(f"[ERROR] {status}")
                         append_csv_log(name, user_mobile, missing, remark, status, dry_run)
@@ -466,8 +555,14 @@ def run_automation(dry_run=False, headless=True):
             print(f"Skipped (Already Remarked/Logged): {skipped_existing}")
             print(f"Skipped (Unmapped Patterns)      : {skipped_unmapped}")
             print(f"Remarks Applied & Saved          : {applied}")
+            print(f"Remark Posting Failures          : {failures}")
             print(f"Audit Log                        : {os.path.abspath(LOG_CSV_PATH)}")
             print("=" * 66)
+            if failures:
+                raise RuntimeError(
+                    f"{failures} remark(s) could not be posted or verified. "
+                    "See the audit log and failure screenshot."
+                )
         except Exception:
             page.screenshot(path=FAILURE_SCREENSHOT_PATH, full_page=True)
             print(f"[ERROR] Failure screenshot saved to {FAILURE_SCREENSHOT_PATH}")
