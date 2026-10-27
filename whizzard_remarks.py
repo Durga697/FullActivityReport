@@ -16,6 +16,11 @@ from playwright.sync_api import sync_playwright
 load_dotenv()
 
 LOGIN_URL = "https://adminpanel.whizzard.in/#/login"
+API_BASE_URL = "https://sapi.whizzard.in/"
+SUPER_USER_REMARK_ENDPOINT = "api/v1/user/addProfileRemarksBySuperUser/"
+# Roles allowed by the Whizzard Pending Users screen to edit Super User Remarks:
+# Central (29), Super User (45), and Central Lead (74).
+SUPER_USER_REMARK_ROLES = {29, 45, 74}
 LOG_CSV_PATH = "processed_log.csv"
 FAILURE_SCREENSHOT_PATH = "automation_failure.png"
 
@@ -295,10 +300,111 @@ def parse_profile(row, columns):
         for value in col2_missing.locator("li").all_text_contents()
         if value.strip()
     ]
-    return name, mobile, missing_fields, col4_remark
+    profile_link = col0.locator("a[href*='/users/userProfile/']").first
+    profile_href = profile_link.get_attribute("href") if profile_link.count() else ""
+    user_id_match = re.search(r"userProfile/([^/?#]+)/pendingList", profile_href or "")
+    user_id = user_id_match.group(1) if user_id_match else None
+    return user_id, name, mobile, missing_fields, col4_remark
 
 
-def apply_remark(page, remark_cell, remark, dry_run):
+def get_authenticated_role(page):
+    """Return the logged-in role without exposing any authentication token."""
+    role = page.evaluate(
+        """() => {
+            try {
+                const user = JSON.parse(localStorage.getItem('currentUser') || '{}');
+                return user.role ?? null;
+            } catch (_) {
+                return null;
+            }
+        }"""
+    )
+    try:
+        return int(role)
+    except (TypeError, ValueError):
+        return None
+
+
+def post_super_user_remark(page, user_id, remark):
+    """Use the same authenticated PUT request as the current Whizzard UI."""
+    if not user_id:
+        raise RuntimeError("Could not determine the Whizzard user ID from the row.")
+
+    result = page.evaluate(
+        """async ({apiBaseUrl, endpoint, userId, remark}) => {
+            let currentUser;
+            try {
+                currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
+            } catch (_) {
+                return {ok: false, status: 0, detail: 'Invalid currentUser session data'};
+            }
+            if (!currentUser.accessToken) {
+                return {ok: false, status: 0, detail: 'Login session has no access token'};
+            }
+
+            const url = new URL(endpoint, apiBaseUrl);
+            url.searchParams.set('userId', userId);
+            url.searchParams.set('comment', remark);
+            url.searchParams.set('status', '');
+            try {
+                const response = await fetch(url, {
+                    method: 'PUT',
+                    headers: {
+                        Authorization: `Bearer ${currentUser.accessToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: '{}'
+                });
+                const detail = (await response.text()).slice(0, 500);
+                return {ok: response.ok, status: response.status, detail};
+            } catch (error) {
+                return {ok: false, status: 0, detail: String(error)};
+            }
+        }""",
+        {
+            "apiBaseUrl": API_BASE_URL,
+            "endpoint": SUPER_USER_REMARK_ENDPOINT,
+            "userId": user_id,
+            "remark": remark,
+        },
+    )
+    if not result.get("ok"):
+        detail = result.get("detail") or "No response body"
+        raise RuntimeError(
+            f"Whizzard remark API returned HTTP {result.get('status')}: {detail}"
+        )
+
+
+def verify_api_remark(page, user_id, remark, remark_column_index):
+    """Reload the list and confirm the API-saved remark is rendered in its row."""
+    page.reload(wait_until="domcontentloaded")
+    wait_for_page(page)
+    profile_link = page.locator(
+        f"a[href*='/users/userProfile/{user_id}/pendingList']"
+    ).first
+    try:
+        profile_link.wait_for(state="visible", timeout=15_000)
+        row = profile_link.locator("xpath=ancestor::tr[1]")
+        remark_cell = row.locator("td").nth(remark_column_index)
+        remark_cell.get_by_text(remark, exact=False).wait_for(
+            state="visible", timeout=15_000
+        )
+    except PlaywrightTimeoutError as error:
+        raise RuntimeError(
+            "The remark API succeeded, but the saved text was not visible after "
+            f"reloading user {user_id}."
+        ) from error
+
+
+def apply_remark(
+    page,
+    remark_cell,
+    remark,
+    dry_run,
+    user_id=None,
+    authenticated_role=None,
+    remark_column_index=None,
+):
     """Open the row's remark editor, save it, and verify the table was updated."""
     edit_candidates = [
         remark_cell.locator(
@@ -360,10 +466,22 @@ def apply_remark(page, remark_cell, remark, dry_run):
             break
 
     if not editor_opened:
-        raise RuntimeError(
-            "No remark edit control opened an editor. "
-            f"Controls tried: {attempted_controls}"
+        if dry_run:
+            return "DRY RUN — Remark Formatted (No Save Attempted)"
+        if authenticated_role not in SUPER_USER_REMARK_ROLES:
+            raise RuntimeError(
+                "The logged-in Whizzard account is not permitted to edit Super "
+                f"User Remarks (role={authenticated_role!r}). Update the GitHub "
+                "WHIZZARD_MOBILE and WHIZZARD_PASSWORD secrets to an account with "
+                "Central, Super User, or Central Lead access."
+            )
+        print(
+            "[NOTE] Remark pencil is absent despite an authorized role; "
+            "using Whizzard's authenticated remark API."
         )
+        post_super_user_remark(page, user_id, remark)
+        verify_api_remark(page, user_id, remark, remark_column_index)
+        return "SUCCESS — Remark Applied via API & Verified"
 
     editor.fill(remark)
     dialog = editor.locator(
@@ -443,6 +561,8 @@ def run_automation(dry_run=False, headless=True):
             wait_for_page(page)
             page.wait_for_timeout(3_000)
             print(f"[STEP 1] Login completed. Current URL: {page.url}")
+            authenticated_role = get_authenticated_role(page)
+            print(f"[STEP 1] Authenticated Whizzard role: {authenticated_role!r}")
 
             print("[STEP 2] Navigating to Onboarding -> Search Users...")
             onboarding = exact_text_control(page, "Onboarding")
@@ -484,6 +604,20 @@ def run_automation(dry_run=False, headless=True):
                 page.wait_for_timeout(3_000)
 
             columns = get_table_column_indexes(page)
+            if not dry_run and authenticated_role not in SUPER_USER_REMARK_ROLES:
+                visible_super_user_controls = page.locator("tbody tr").locator(
+                    "td"
+                ).nth(columns["remark"]).locator(
+                    "button.btn.btn-xs:visible:has(i.fa-pencil), "
+                    "button.btn.btn-xs:visible:has(i[class*='pencil'])"
+                )
+                if visible_super_user_controls.count() == 0:
+                    raise RuntimeError(
+                        "The logged-in Whizzard account cannot edit Super User "
+                        f"Remarks (role={authenticated_role!r}). Change the GitHub "
+                        "WHIZZARD_MOBILE and WHIZZARD_PASSWORD secrets to a Central, "
+                        "Super User, or Central Lead account."
+                    )
             processed = skipped_existing = skipped_unmapped = applied = failures = 0
             page_number = 1
             while True:
@@ -494,7 +628,7 @@ def run_automation(dry_run=False, headless=True):
                     if row.locator("td").count() <= max(columns.values()):
                         continue
                     processed += 1
-                    name, user_mobile, missing, remark_cell = parse_profile(
+                    user_id, name, user_mobile, missing, remark_cell = parse_profile(
                         row, columns
                     )
                     existing_remark = remark_cell.inner_text().strip()
@@ -522,7 +656,15 @@ def run_automation(dry_run=False, headless=True):
                         continue
 
                     try:
-                        status = apply_remark(page, remark_cell, remark, dry_run)
+                        status = apply_remark(
+                            page,
+                            remark_cell,
+                            remark,
+                            dry_run,
+                            user_id=user_id,
+                            authenticated_role=authenticated_role,
+                            remark_column_index=columns["remark"],
+                        )
                         if not dry_run:
                             applied += 1
                         print(f"[SUCCESS] {status}")
