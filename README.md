@@ -75,8 +75,11 @@ python whizzard_remarks.py
 2. **Configure Environment Variables**:
    Copy `.env.example` to `.env` and fill in credentials:
    ```env
-   WHIZZARD_MOBILE=your_mobile_number
-   WHIZZARD_PASSWORD=your_password
+   WHIZZARD_MOBILE_1=your_first_mobile_number
+   WHIZZARD_PASSWORD_1=your_first_password
+   WHIZZARD_MOBILE_2=your_second_mobile_number
+   WHIZZARD_PASSWORD_2=your_second_password
+   WHIZZARD_ACCOUNT=both
    ```
 
 ## GitHub Actions Schedule
@@ -85,10 +88,13 @@ The remarks automation runs every day at **10:00 AM IST** through
 `.github/workflows/daily-remarks.yml`. It can also be started manually from the
 repository's **Actions** tab.
 
-Add these repository secrets under **Settings → Secrets and variables → Actions**:
+The scheduled run uses account 1 first, then account 2. Add these repository secrets
+under **Settings → Secrets and variables → Actions**:
 
-- `WHIZZARD_MOBILE`
-- `WHIZZARD_PASSWORD`
+- `WHIZZARD_MOBILE_1`
+- `WHIZZARD_PASSWORD_1`
+- `WHIZZARD_MOBILE_2`
+- `WHIZZARD_PASSWORD_2`
 
 ---
 

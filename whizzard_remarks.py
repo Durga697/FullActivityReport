@@ -11,9 +11,13 @@ import sys
 from dotenv import load_dotenv
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 load_dotenv()
+
+# Keep Playwright diagnostics printable on Windows when they include icon fonts.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 LOGIN_URL = "https://adminpanel.whizzard.in/#/login"
 # Roles allowed by the Whizzard Pending Users screen to edit Super User Remarks:
@@ -320,155 +324,109 @@ def get_authenticated_role(page):
 
 
 def apply_remark(page, remark_cell, remark, dry_run, authenticated_role=None):
-    """Open the row's remark editor, save it, and verify the table was updated."""
-    edit_candidates = [
-        # Exact row-relative equivalent of:
-        # /html/body/.../table/tbody/tr[n]/td[5]/button/i
-        remark_cell.locator("xpath=./button/i"),
-        remark_cell.locator(
-            "button:visible:has(i.fa-pencil), "
-            "button:visible:has(i[class*='pencil'])"
-        ),
-        remark_cell.locator("button:visible"),
-    ]
-    editor = page.locator(
-        "textarea:visible, "
-        "input:visible[formcontrolname*='remark' i], "
-        "input:visible[name*='remark' i], "
-        "[contenteditable='true']:visible"
-    ).first
-    editor_opened = False
-    candidate_number = 0
-    attempted_controls = []
-    for candidates in edit_candidates:
-        for index in range(candidates.count()):
-            candidate_number += 1
-            candidate = candidates.nth(index)
-            attempted_controls.append(
-                candidate.evaluate(
-                    """element => ({
-                        tag: element.tagName,
-                        text: (element.innerText || '').trim(),
-                        title: element.getAttribute('title'),
-                        ariaLabel: element.getAttribute('aria-label'),
-                        className: element.getAttribute('class')
-                    })"""
-                )
-            )
-            try:
-                safe_click(
-                    page,
-                    candidate,
-                    description=f"remark edit candidate {candidate_number}",
-                    attempts=1,
-                    timeout=5_000,
-                )
-                editor.wait_for(state="visible", timeout=4_000)
-                editor_opened = True
+    """Save through the selected profile's modal and verify the same profile."""
+    if authenticated_role not in SUPER_USER_REMARK_ROLES:
+        raise RuntimeError("This account cannot edit Super User Remarks.")
+    page.wait_for_load_state("networkidle", timeout=30_000)
+    button = remark_cell.locator("button:has(i.fa-pencil)")
+    if button.count() != 1 or not button.is_enabled():
+        raise RuntimeError("Expected one enabled remark edit button on this profile.")
+
+    # Whizzard renders this authorized control with display:none, even on hover.
+    # Invoke the specific row's button, never a page-wide or positional icon.
+    button.evaluate("element => element.click()")
+    dialog = page.locator("ngb-modal-window:visible")
+    dialog.wait_for(state="visible")
+    editor = dialog.locator("textarea")
+    if dialog.count() != 1 or editor.count() != 1:
+        raise RuntimeError("Expected one Super User Remark editor.")
+    page.wait_for_load_state("networkidle", timeout=30_000)
+    # Angular occasionally resets a newly opened textarea after its first
+    # change event. Re-fill the same modal a few times before treating it as
+    # a failure; do not click Save unless the full requested value is present.
+    for attempt in range(3):
+        try:
+            editor.fill(remark, timeout=5_000)
+            editor.press("Tab", timeout=5_000)
+            if editor.input_value() == remark:
                 break
-            except (PlaywrightTimeoutError, RuntimeError):
-                print(
-                    f"[NOTE] Candidate {candidate_number} did not open the remark editor."
-                )
-                try:
-                    candidate.evaluate("element => element.click()")
-                    editor.wait_for(state="visible", timeout=4_000)
-                    print(
-                        f"[NOTE] DOM click opened candidate {candidate_number}."
-                    )
-                    editor_opened = True
-                    break
-                except (PlaywrightTimeoutError, PlaywrightError):
-                    pass
-        if editor_opened:
-            break
-
-    if not editor_opened:
-        if dry_run:
-            return "DRY RUN — Remark Formatted (No Save Attempted)"
-        if authenticated_role not in SUPER_USER_REMARK_ROLES:
-            raise RuntimeError(
-                "The logged-in Whizzard account is not permitted to edit Super "
-                f"User Remarks (role={authenticated_role!r}). Update the GitHub "
-                "WHIZZARD_MOBILE and WHIZZARD_PASSWORD secrets to an account with "
-                "Central, Super User, or Central Lead access."
-            )
+        except PlaywrightError:
+            pass
+        page.wait_for_timeout((attempt + 1) * 500)
+    else:
         raise RuntimeError(
-            "The Super User Remarks pencil did not open an editor. "
-            f"Controls tried: {attempted_controls}"
+            "Remark editor did not retain the requested text. "
+            f"Current value: {editor.input_value()!r}"
         )
-
-    editor.fill(remark)
-    dialog = editor.locator(
-        "xpath=ancestor::*[@role='dialog' or "
-        "contains(concat(' ', normalize-space(@class), ' '), ' modal-content ')][1]"
-    )
-    controls = dialog if dialog.count() else page
     if dry_run:
-        safe_click(
-            page,
-            controls.get_by_role("button", name=re.compile("close|cancel", re.I)),
-            description="Close remark modal",
-        )
+        dialog.get_by_role("button", name="Close", exact=True).click()
+        dialog.wait_for(state="hidden")
         return "DRY RUN — Remark Formatted (Not Saved)"
 
-    save_candidates = [
-        # Exact XPath supplied for the first button in the modal footer.
-        page.locator(
-            "xpath=/html/body/ngb-modal-window/div/div/div[3]/button[1]"
-        ),
-        controls.get_by_role(
-            "button", name=re.compile(r"^\s*(save|submit|update)\s*$", re.I)
-        ),
-        controls.locator(
-            "xpath=.//*[contains(concat(' ', normalize-space(@class), ' '), "
-            "' modal-footer ')]/button[1]"
-        ),
-    ]
-    save_error = None
-    save_clicked = False
-    for save_candidate in save_candidates:
-        if save_candidate.count() == 0:
-            continue
-        try:
-            safe_click(
-                page,
-                save_candidate,
-                description="Save remark",
-                attempts=1,
-                timeout=10_000,
-            )
-            save_error = None
-            save_clicked = True
-            break
-        except (PlaywrightTimeoutError, RuntimeError) as error:
-            save_error = error
-    if not save_clicked:
-        raise RuntimeError("Could not click the remark modal Save button.") from save_error
-    wait_for_page(page)
-    editor.wait_for(state="hidden", timeout=15_000)
-    page.wait_for_timeout(1_000)
-
-    # A click alone is not proof that the API accepted the remark. The table
-    # must display the saved text before this profile is counted as successful.
+    if editor.input_value() != remark:
+        raise RuntimeError("Remark editor was cleared before Save was clicked.")
     try:
-        remark_cell.get_by_text(remark, exact=False).wait_for(
-            state="visible", timeout=15_000
-        )
+        with page.expect_response(
+            lambda response: "/user/addProfileRemarksBySuperUser/" in response.url,
+            timeout=60_000,
+        ) as saved:
+            # The site's Save handler closes the modal and can trigger Angular
+            # navigation work; waiting for that navigation can time out after the
+            # click has already been dispatched. The API response below is the
+            # save confirmation we need.
+            dialog.get_by_role("button", name="Save", exact=True).click(
+                force=True, no_wait_after=True
+            )
     except PlaywrightTimeoutError as error:
-        current_text = remark_cell.inner_text().strip()
-        raise RuntimeError(
-            "Save dialog closed, but the saved remark was not visible in the "
-            f"profile row. Current remark cell: {current_text!r}"
-        ) from error
-    return "SUCCESS — Remark Applied & Saved"
+        # A delayed/lost API response does not necessarily mean the save failed.
+        # The click has already been dispatched, so first check the UI's saved
+        # state before reporting an error or allowing a later scheduled run to
+        # attempt the same change again.
+        try:
+            dialog.wait_for(state="hidden", timeout=15_000)
+            expect(remark_cell).to_contain_text(remark, timeout=20_000)
+        except (PlaywrightTimeoutError, AssertionError) as verify_error:
+            raise RuntimeError(
+                "Save response timed out and the remark was not visible in the "
+                "profile afterward; outcome remains unverified."
+            ) from error
+        return "SUCCESS — Remark Saved (UI verified; API response timed out)"
+    if not saved.value.ok:
+        raise RuntimeError(f"Remark save returned HTTP {saved.value.status}.")
+    dialog.wait_for(state="hidden", timeout=15_000)
+    page.wait_for_load_state("networkidle", timeout=30_000)
+    # The pending list can refresh/reorder on save. The caller binds this cell
+    # to a unique mobile number, not its current numerical row position.
+    # Saving from a later pagination page can return the table to page one.
+    # In that case the authenticated API response is the available proof; if
+    # the row remains in the current table, also verify its rendered text.
+    if remark_cell.count():
+        try:
+            expect(remark_cell).to_contain_text(remark, timeout=20_000)
+            return "SUCCESS — Remark Applied & Saved"
+        except AssertionError:
+            # The table can switch pages during the render check. Re-query
+            # after the assertion wait; only accept this when the same row is
+            # no longer present and the API has already confirmed the save.
+            page.wait_for_timeout(500)
+            if remark_cell.count() == 0:
+                return "SUCCESS — Remark Saved (API verified; table refreshed pages)"
+            raise
+    return "SUCCESS — Remark Saved (API verified; table refreshed pages)"
 
 
-def run_automation(dry_run=False, headless=True):
-    mobile = os.environ.get("WHIZZARD_MOBILE")
-    password = os.environ.get("WHIZZARD_PASSWORD")
+def run_automation(dry_run=False, headless=True, account="1"):
+    mobile = os.environ.get(f"WHIZZARD_MOBILE_{account}")
+    password = os.environ.get(f"WHIZZARD_PASSWORD_{account}")
+    # Preserve compatibility with the original single-account environment vars.
+    if account == "1":
+        mobile = mobile or os.environ.get("WHIZZARD_MOBILE")
+        password = password or os.environ.get("WHIZZARD_PASSWORD")
     if not mobile or not password:
-        print("[ERROR] WHIZZARD_MOBILE and WHIZZARD_PASSWORD must be configured.")
+        print(
+            f"[ERROR] Credentials for account {account} must be configured as "
+            f"WHIZZARD_MOBILE_{account} and WHIZZARD_PASSWORD_{account}."
+        )
         sys.exit(1)
 
     print("=" * 66)
@@ -476,6 +434,7 @@ def run_automation(dry_run=False, headless=True):
     print("=" * 66)
     print(f"Mode: {'[DRY RUN]' if dry_run else '[LIVE EXECUTION]'}")
     print(f"Browser Mode: {'[HEADLESS]' if headless else '[HEADFUL / GUI]'}")
+    print(f"Credential Account: {account}")
     print(f"Mobile Account: {mobile}")
     print("=" * 66)
     init_csv_log()
@@ -488,6 +447,7 @@ def run_automation(dry_run=False, headless=True):
         context = browser.new_context(viewport={"width": 1920, "height": 1080})
         page = context.new_page()
         page.set_default_timeout(20_000)
+        page.set_default_navigation_timeout(60_000)
 
         try:
             print("[STEP 1] Navigating to login page...")
@@ -560,18 +520,52 @@ def run_automation(dry_run=False, headless=True):
                     )
             processed = skipped_existing = skipped_unmapped = applied = failures = 0
             page_number = 1
+            seen_profiles = set()
             while True:
-                row_count = page.locator("tbody tr").count()
+                rows = page.locator("table.pending-users-table tbody tr")
+                # Snapshot stable identities before saves can refresh the list.
+                identity_texts = rows.locator("td:first-child").all_text_contents()
+                identities = []
+                for identity in identity_texts:
+                    match = re.search(r"Mobile:\s*(\d{10})", identity, re.I)
+                    if not match:
+                        raise RuntimeError("A pending profile has no unique mobile number.")
+                    identities.append(match.group(1))
+                if len(set(identities)) != len(identities):
+                    raise RuntimeError("Duplicate mobile numbers in pending users table.")
+                row_count = len(identities)
                 print(f"[STEP 5] Page {page_number}: {row_count} pending profiles.")
-                for index in range(row_count):
-                    row = page.locator("tbody tr").nth(index)
+                for index, profile_mobile in enumerate(identities):
+                    if profile_mobile in seen_profiles:
+                        continue
+                    seen_profiles.add(profile_mobile)
+                    row = rows.filter(has=page.locator("td:first-child").filter(
+                        has_text=profile_mobile
+                    ))
+                    if row.count() != 1:
+                        # Saving a remark refreshes the pending table. A row in the
+                        # pre-save snapshot can legitimately disappear or move while
+                        # the refresh completes; a later pass will inspect the live
+                        # table again.
+                        print(
+                            f"[NOTE] Profile {profile_mobile} changed during table "
+                            "refresh; it will be checked on the next pass."
+                        )
+                        continue
                     if row.locator("td").count() <= max(columns.values()):
                         continue
                     processed += 1
-                    name, user_mobile, missing, remark_cell = parse_profile(
-                        row, columns
-                    )
-                    existing_remark = remark_cell.inner_text().strip()
+                    try:
+                        name, user_mobile, missing, remark_cell = parse_profile(
+                            row, columns
+                        )
+                        existing_remark = remark_cell.inner_text(timeout=5_000).strip()
+                    except PlaywrightTimeoutError:
+                        print(
+                            f"[NOTE] Profile {profile_mobile} is refreshing; "
+                            "skipping it for this pass."
+                        )
+                        continue
                     print(
                         f"Profile {index + 1}/{row_count}: {name} | "
                         f"{user_mobile} | Missing: {missing}"
@@ -607,11 +601,12 @@ def run_automation(dry_run=False, headless=True):
                             applied += 1
                         print(f"[SUCCESS] {status}")
                         append_csv_log(name, user_mobile, missing, remark, status, dry_run)
-                    except (PlaywrightError, RuntimeError) as error:
+                    except (PlaywrightError, RuntimeError, AssertionError) as error:
                         failures += 1
                         status = f"FAILED — ERROR applying remark: {error}"
                         print(f"[ERROR] {status}")
                         append_csv_log(name, user_mobile, missing, remark, status, dry_run)
+                        raise RuntimeError("Stopped after an unverified save; inspect the audit log.") from error
 
                 pagination_links = page.locator(
                     "ul.pagination:not(.pull-right) li:not(.disabled) a"
@@ -643,9 +638,13 @@ def run_automation(dry_run=False, headless=True):
                     f"{failures} remark(s) could not be posted or verified. "
                     "See the audit log and failure screenshot."
                 )
-        except Exception:
-            page.screenshot(path=FAILURE_SCREENSHOT_PATH, full_page=True)
-            print(f"[ERROR] Failure screenshot saved to {FAILURE_SCREENSHOT_PATH}")
+        except Exception as error:
+            print(f"[ERROR] {error}")
+            try:
+                page.screenshot(path=FAILURE_SCREENSHOT_PATH, timeout=5_000)
+                print(f"[ERROR] Failure screenshot saved to {FAILURE_SCREENSHOT_PATH}")
+            except PlaywrightError:
+                print("[NOTE] Screenshot unavailable; preserving the original error.")
             raise
         finally:
             context.close()
@@ -662,5 +661,24 @@ if __name__ == "__main__":
     parser.add_argument(
         "--headful", action="store_true", help="Show the browser window."
     )
+    parser.add_argument(
+        "--account",
+        choices=("1", "2", "both"),
+        default=os.environ.get("WHIZZARD_ACCOUNT", "1"),
+        help="Credential account to use (1, 2, or both sequentially).",
+    )
     arguments = parser.parse_args()
-    run_automation(dry_run=arguments.dry_run, headless=not arguments.headful)
+    accounts = ("1", "2") if arguments.account == "both" else (arguments.account,)
+    failures = []
+    for account in accounts:
+        try:
+            run_automation(
+                dry_run=arguments.dry_run,
+                headless=not arguments.headful,
+                account=account,
+            )
+        except Exception as error:
+            failures.append((account, error))
+            print(f"[ERROR] Account {account} run failed: {error}")
+    if failures:
+        sys.exit(1)

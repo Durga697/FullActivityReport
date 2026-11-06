@@ -12,3 +12,7 @@ scratch/
 processed_log.csv
 activation_log.csv
 bank_proof_*.png
+automation_failure.png
+run-logs/
+*_output.txt
+diagnostic_output.txt

@@ -36,8 +36,11 @@ jobs:
 
       - name: Run remarks automation
         env:
-          WHIZZARD_MOBILE: ${{ secrets.WHIZZARD_MOBILE }}
-          WHIZZARD_PASSWORD: ${{ secrets.WHIZZARD_PASSWORD }}
+          WHIZZARD_MOBILE_1: ${{ secrets.WHIZZARD_MOBILE_1 }}
+          WHIZZARD_PASSWORD_1: ${{ secrets.WHIZZARD_PASSWORD_1 }}
+          WHIZZARD_MOBILE_2: ${{ secrets.WHIZZARD_MOBILE_2 }}
+          WHIZZARD_PASSWORD_2: ${{ secrets.WHIZZARD_PASSWORD_2 }}
+          WHIZZARD_ACCOUNT: both
           TZ: Asia/Kolkata
         run: python whizzard_remarks.py
 
