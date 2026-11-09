@@ -365,32 +365,59 @@ def apply_remark(page, remark_cell, remark, dry_run, authenticated_role=None):
 
     if editor.input_value() != remark:
         raise RuntimeError("Remark editor was cleared before Save was clicked.")
+    save_url_part = "/user/addProfileRemarksBySuperUser/"
+    save_requests = []
+
+    def track_save_request(request):
+        if save_url_part in request.url:
+            save_requests.append(request)
+
+    page.on("request", track_save_request)
     try:
-        with page.expect_response(
-            lambda response: "/user/addProfileRemarksBySuperUser/" in response.url,
-            timeout=60_000,
-        ) as saved:
-            # The site's Save handler closes the modal and can trigger Angular
-            # navigation work; waiting for that navigation can time out after the
-            # click has already been dispatched. The API response below is the
-            # save confirmation we need.
-            dialog.get_by_role("button", name="Save", exact=True).click(
-                force=True, no_wait_after=True
-            )
-    except PlaywrightTimeoutError as error:
-        # A delayed/lost API response does not necessarily mean the save failed.
-        # The click has already been dispatched, so first check the UI's saved
-        # state before reporting an error or allowing a later scheduled run to
-        # attempt the same change again.
+        save_button = dialog.get_by_role("button", name="Save", exact=True)
+        if save_button.count() != 1 or not save_button.is_enabled():
+            raise RuntimeError("The remark Save button is unavailable.")
+
         try:
-            dialog.wait_for(state="hidden", timeout=15_000)
-            expect(remark_cell).to_contain_text(remark, timeout=20_000)
-        except (PlaywrightTimeoutError, AssertionError) as verify_error:
-            raise RuntimeError(
-                "Save response timed out and the remark was not visible in the "
-                "profile afterward; outcome remains unverified."
-            ) from error
-        return "SUCCESS — Remark Saved (UI verified; API response timed out)"
+            with page.expect_response(
+                lambda response: save_url_part in response.url,
+                timeout=60_000,
+            ) as saved:
+                # Use the normal visible-button click so Playwright verifies the
+                # control is actionable before dispatching the site's handler.
+                save_button.click(timeout=15_000, no_wait_after=True)
+        except PlaywrightTimeoutError as first_error:
+            # A timeout with no matching request means the click did not reach
+            # the save endpoint. Retry once only in that case; never resubmit a
+            # request whose server-side outcome is unknown.
+            if (
+                save_requests
+                or not dialog.is_visible()
+                or editor.input_value() != remark
+                or not save_button.is_enabled()
+            ):
+                raise RuntimeError(
+                    "Save response timed out after the request was sent or the "
+                    "editor changed; outcome remains unverified."
+                ) from first_error
+
+            print(
+                "[NOTE] Save did not reach the endpoint; retrying the visible "
+                "Save button once."
+            )
+            try:
+                with page.expect_response(
+                    lambda response: save_url_part in response.url,
+                    timeout=60_000,
+                ) as saved:
+                    save_button.click(timeout=15_000, no_wait_after=True)
+            except PlaywrightTimeoutError as retry_error:
+                raise RuntimeError(
+                    "No save response arrived after one retry; outcome remains "
+                    "unverified."
+                ) from retry_error
+    finally:
+        page.remove_listener("request", track_save_request)
     if not saved.value.ok:
         raise RuntimeError(f"Remark save returned HTTP {saved.value.status}.")
     dialog.wait_for(state="hidden", timeout=15_000)
@@ -606,7 +633,24 @@ def run_automation(dry_run=False, headless=True, account="1"):
                         status = f"FAILED — ERROR applying remark: {error}"
                         print(f"[ERROR] {status}")
                         append_csv_log(name, user_mobile, missing, remark, status, dry_run)
-                        raise RuntimeError("Stopped after an unverified save; inspect the audit log.") from error
+                        # A failed/unverified profile should not prevent the
+                        # remaining users (or the next account) from running.
+                        # Close an open editor without submitting again; the
+                        # next scheduled run will re-check the live remark first.
+                        open_dialog = page.locator("ngb-modal-window:visible")
+                        if open_dialog.count():
+                            close_button = open_dialog.get_by_role(
+                                "button", name="Close", exact=True
+                            )
+                            if close_button.count() != 1 or not close_button.is_enabled():
+                                raise RuntimeError(
+                                    "Could not safely close the failed remark editor; "
+                                    "stopping this account."
+                                ) from error
+                            close_button.click(timeout=10_000)
+                            open_dialog.wait_for(state="hidden", timeout=10_000)
+                        page.wait_for_timeout(1_000)
+                        continue
 
                 pagination_links = page.locator(
                     "ul.pagination:not(.pull-right) li:not(.disabled) a"
